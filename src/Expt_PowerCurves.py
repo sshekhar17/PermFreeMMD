@@ -1,3 +1,6 @@
+"""
+Compute the Power curves for different MMD-based two-sample tests
+"""
 import argparse 
 from datetime import datetime 
 import numpy as np     
@@ -7,7 +10,7 @@ from math import sqrt
 import matplotlib.pyplot as plt 
 plt.style.use('seaborn-white')
 
-from utils import GaussianVector
+from utils import *
 from MMDutils import * 
 import tikzplotlib as tpl 
 
@@ -28,6 +31,8 @@ def main(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
     kernel_func : function hand for the pos-def kernel
     (n, m)      : number of X and Y observations
     num_trials  : number of repetitions for estimating the power 
+    num_perms   : number of permutations to be used by permutation test
+    alpha       : float denoting the significance level
     methods     : list of string indicating the names of tests to be compared
     num_points  : number of points in the power curves
     kernel_type : "RBF" or "Polynomial" or "Linear"
@@ -41,8 +46,8 @@ def main(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
     num_pts_bw  : int, used in calling the "median_bw_selector" function
     """
    
-    # generate the values of sample-sizes to be used in plotting 
-    # the power curves
+    # initialize the sample-sizes to be used in generating the 
+    # power curves
     NN = np.linspace(initial_sample_size, n, num_points, dtype=int)
     MM = np.linspace(initial_sample_size, n, num_points, dtype=int)
 
@@ -194,13 +199,34 @@ def main(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
     Results['filename'] = filename
     return Results
 
-
+##----
 def mainTime(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
             num_perms=200, alpha=0.05, num_points=20,
             block_size_exponent = 0.5, methods=None, kernel_type='RBF',
             poly_degree=2, initial_sample_size=10, save_fig=False,
             figname=None,  title_info=None, mode=1, num_pts_bw=50):
-   
+    """
+        Plot the running-time vs power for different tests 
+        SourceX     : function handle for generate X samples 
+        SourceY     : function handle for generate Y samples 
+        kernel_func : function hand for the pos-def kernel
+        (n, m)      : number of X and Y observations
+        num_trials  : number of repetitions for estimating the power 
+        num_perms   : number of permutations to be used by permutation test
+        alpha       : float denoting the significance level
+        methods     : list of string indicating the names of tests to be compared
+        num_points  : number of points in the power curves
+        kernel_type : "RBF" or "Polynomial" or "Linear"
+        poly_degree : int denoting the degree of polynomial, if kernel_type="Polynomial"
+        save_fig    : if True, save the figures
+        save_data   : if True, save the data 
+        figname     : string denoting the name of the figure (used if save_fig==True)
+        filename    : string denoting the name of the files (used if save_data==True)
+        title_info  : string to be used in generating the title of the figures
+        mode        : int in {1, 2}, used in calling the "median_bw_selector" function
+        num_pts_bw  : int, used in calling the "median_bw_selector" function
+
+    """
     if methods is None: 
         methods = ['mmd-perm', 'c-mmd']
 
@@ -212,24 +238,26 @@ def mainTime(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
     # initialize the set of sample-sizes to be used 
     NN = np.linspace(initial_sample_size, n, num_points, dtype=int)
     MM = np.linspace(initial_sample_size, m, num_points, dtype=int)
-    #########################################################################
 
     #set up function handles for different threshold computing methods
     thresh_permutation = partial(get_bootstrap_threshold, num_perms=num_perms) 
     thresh_normal = get_normal_threshold
     thresh_spectral = partial(get_spectral_threshold,  alpha=alpha, numNullSamp=200)
 
+    # initialize the dictionary for storing the running times and 
+    # powers of different tests 
     TimesDict, PowerDict =  {}, {}
-
     for method in methods:
         assert NN.shape == MM.shape 
         PowerDict[method] = np.zeros(NN.shape)
         TimesDict[method] = np.zeros(NN.shape)
 
+    # the main loop 
     for i in tqdm(range(num_trials)):
         for j, (ni, mi) in enumerate(zip(NN, MM)):
+            # generate the data for the current trial
             X, Y = SourceX(ni), SourceY(mi) 
-
+            # get the bandwidth, and the kernel
             bw = median_bw_selector(SourceX, SourceY, X, Y, mode, num_pts_bw)
             if kernel_func is None: # default is to use the RBF kernel
                 if kernel_type=='RBF' or kernel_type is None:
@@ -243,12 +271,11 @@ def mainTime(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
                     else:
                         kernel_func = partial(PolynomialKernel, degree=poly_degree,
                         scale=bw)
-
             # set up function handles for the different statistics 
             unbiased_mmd2 = partial(TwoSampleMMDSquared, unbiased=True) 
             biased_mmd2 = partial(TwoSampleMMDSquared, unbiased=False) 
             cross_mmd2 = crossMMD2sampleUnpaired
-
+            # run the differnet tests
             for method in methods:
                 start_time = time()
                 if method=='mmd-perm':
@@ -274,14 +301,13 @@ def mainTime(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
                 running_time = time() - start_time 
                 TimesDict[method][j] += running_time 
                 PowerDict[method][j] += 1.0*(stat>th)
-
+    # obtain the power and average running times
     for method in methods:
-        TimesDict[method] /=  num_trials
         PowerDict[method] /=  num_trials
-
-    palette = sns.color_palette(palette='tab10', n_colors=10)
+        TimesDict[method] /=  num_trials
 
     # Generate the results dict 
+    palette = sns.color_palette(palette='tab10', n_colors=10)
     Results = {}
     Results['num_trials'] = num_trials 
     Results['n'] = n 
@@ -295,6 +321,7 @@ def mainTime(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
     Results['methods'] = methods
     Results['palette'] = palette
 
+    # plot the figures 
     fig1 = plt.figure()
     ax = fig1.add_subplot(111)
     markers = ['o', '^', 's', 'p', '*', 'P']
@@ -304,7 +331,6 @@ def mainTime(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
         sizes = 10 + power * 60 # maximum size is 20  
         ax.scatter(times, power, s=sizes, label=method, color=palette[i], 
                         marker=markers[i], alpha=0.7, edgecolors='k')
-
     if title_info is not None:
         ax.set_title(f"Power vs Running time" +title_info, fontsize=16)
     else:
@@ -365,8 +391,6 @@ if __name__=='__main__':
     parser.add_argument('--num_pts_bw', type=int, default=25,
                             help="number of data-points for median heuristic")
 
-
-
     args = parser.parse_args()
     d = args.d
     epsilon = args.eps
@@ -398,8 +422,6 @@ if __name__=='__main__':
 
     def SourceY(n):
         return GaussianVector(mean=meanY, cov=covY, n=n)
-
-   
 
     # information used in the title of the figures        
     title_info = f"(d={d}, j={num_perturbations}, $\epsilon$={epsilon})"

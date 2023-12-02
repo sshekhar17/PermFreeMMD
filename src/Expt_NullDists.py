@@ -1,3 +1,6 @@
+"""
+Plot the Null distribution for cross-MMD statistic
+"""
 import argparse
 import pickle
 from datetime import datetime 

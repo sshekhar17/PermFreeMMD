@@ -13,7 +13,7 @@ plt.style.use('seaborn-white')
 import seaborn as sns
 
 from utils import * 
-from MMDutils import * 
+# from MMDutils import * 
 
 def runTest(X, Y, kernel_func, stat_func, thresh_func, 
             alpha=0.05, paired=False, thresh_method='bootstrap'):
@@ -222,6 +222,61 @@ def main(d=10, epsilon=0.3, n=300, num_trials=200, num_perms=200, alpha=0.05,
 
     if return_data:
         return PowerDict, TimesDict
+
+
+def runCMMDtest(SourceX, SourceY, n, m, kernel_func=None, 
+                    alpha=0.05, num_trials=100, return_stat_vals=False, 
+                    mode=1, num_pts=25):
+    th = get_normal_threshold(alpha=alpha)
+    stat = np.zeros((num_trials,))
+    rejected = np.zeros((num_trials,))
+    for i in range(num_trials): 
+        # get the samples 
+        X, Y = SourceX(n), SourceY(m)
+        # check if the kernel function is provided
+        if kernel_func is None: 
+            bw = median_bw_selector(SourceX, SourceY, X, Y, mode=mode, num_pts=num_pts)
+            kernel_ = partial(RBFkernel1, bw=bw)
+        else:
+            kernel_ = kernel_func 
+        # compute the statistic 
+        stat[i] = crossMMD2sampleUnpaired(X, Y, kernel_func=kernel_)
+        # check if stat[i] is above the rejection threshold or not 
+        if stat[i]>th:
+            rejected[i] = 1
+        
+    power = np.sum(rejected) / num_trials 
+    if return_stat_vals: 
+        return stat 
+    else:
+        return power 
+
+
+def runCMMDexperiment(SourceX, SourceY, 
+                        n, m=None, 
+                        kernel_func=None, 
+                        num_trials=200,
+                        alpha=0.05,
+                        num_steps=20,
+                        seed=None,
+                        initial_value=20, 
+                        mode=1, 
+                        num_pts=25
+):
+    if seed is not None: 
+        np.random.seed(seed)
+    # GMD Source 
+    m = n if m is None else m 
+    NN = np.linspace(initial_value, n, num_steps, dtype=int)
+    MM = np.linspace(initial_value, m, num_steps, dtype=int)
+    Power = np.zeros((len(NN), ))
+    for i, (n_, m_) in enumerate(zip(NN, MM)):
+        power = runCMMDtest(SourceX, SourceY, n_, m_,
+                    kernel_func=kernel_func, alpha=alpha,
+                    num_trials=num_trials, return_stat_vals=False, 
+                    mode=mode, num_pts=num_pts)
+        Power[i] = power 
+    return NN, MM, Power
 
 if __name__=='__main__':
     # the sampling distributions 
