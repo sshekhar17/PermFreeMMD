@@ -13,125 +13,7 @@ plt.style.use('seaborn-white')
 import seaborn as sns
 
 from utils import * 
-
-def get_median_bw(Z=None, X=None, Y=None):
-    """
-    Return the median of the pairwise distances (in terms of L2 norm). 
-    """
-    if Z is None:
-        assert (X is not None) and (Y is not None)
-        Z = torch.cat([X, Y], dim=0)
-    dists_ = torch.pdist(Z)
-    sig = torch.median(dists_)
-    return sig.item()
-
-
-
-
-def get_bootstrap_threshold(X, Y, kernel_func, statfunc, alpha=0.05,
-                            num_perms=500, progress_bar=False, device='cuda',
-                            return_stats=False, use_numpy=False):
-    """
-        Return the level-alpha rejection threshold for the statistic 
-        computed by the function handle stat_func using num_perms 
-        permutations. 
-    """
-    assert len(X.shape)==2
-    # concatenate the two samples 
-    if use_numpy:
-        Z = np.vstack((X,Y))
-    else:
-        Z = torch.vstack((X, Y))
-        Z = Z.to(device)
-    # assert len(X)==len(Y)
-    n,  n_plus_m = len(X), len(Z)
-    # kernel matrix of the concatenated data
-    KZ = kernel_func(Z, Z) # 
-    
-    original_statistic = statfunc(X, Y, kernel_func)
-    if use_numpy:
-        perm_statistics = np.zeros((num_perms,))
-    else:
-        perm_statistics = torch.zeros((num_perms,), device=device)
-
-    range_ = tqdm(range(num_perms)) if progress_bar else range(num_perms)
-    for i in range_:
-        if use_numpy:
-            perm = np.random.permutation(n_plus_m)
-        else:
-            perm = torch.randperm(n_plus_m)
-        X_, Y_ = Z[perm[:n]], Z[perm[n:]] 
-        stat = statfunc(X_, Y_, kernel_func)
-        perm_statistics[i] = stat
-
-    # obtain the threshold
-    if use_numpy:
-        perm_statistics = np.sort(perm_statistics) 
-    else:
-        perm_statistics, _ = torch.sort(perm_statistics) 
-    i_ = int(num_perms*(1-alpha)) 
-    threshold = perm_statistics[i_]
-    if not use_numpy:
-        threshold = threshold.item()
-    if return_stats:
-        return threshold, perm_statistics
-    else:
-        return threshold
-
-
-
-def get_unifrom_convergence_threshold(n, m, k_max=1.0, alpha=0.05, biased=False): 
-    assert 0<alpha<1
-    if biased: 
-        #use Mcdiarmid's inequality based bound stated in Corollary 9 of 
-        # Gretton et al. (2012), JMLR
-        threshold = sqrt(k_max/n + k_max/m)*(1+ sqrt(2*log(1/alpha)))
-    else:
-        # use Hoeffding's inequality based bound stated in Corollary 11 of 
-        # Gretton et al. (2012), JMLR
-        threshold = (sqrt(2)*4*k_max/sqrt(m+n)) * sqrt(log(1/alpha))
-    return threshold
-
-def get_normal_threshold(alpha):
-    return stats.norm.ppf(1-alpha)
-
-def get_spectral_threshold(X, Y, kernel_func, alpha=0.05, numEigs=None,
-                            numNullSamp=200):
-    n = len(X)
-    assert len(Y)==n
-
-    if numEigs is None:
-        numEigs = 2*n-2
-    numEigs = min(2*n-2, numEigs)
-
-    testStat = n*TwoSampleMMDSquared(X, Y, kernel_func, unbiased=False)
-
-    #Draw samples from null distribution
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    Z = torch.vstack((X, Y))
-    Z = Z.to(device)
-    # kernel matrix of the concatenated data
-    KZ = kernel_func(Z, Z) # 
-    
-    H = torch.eye(2*n) - 1/(2*n)*torch.ones((2*n, 2*n))
-    H = H.to(device)
-    KZ_ = torch.mm(H, torch.mm(KZ, H))
-
-
-    kEigs = torch.linalg.eigvals(KZ_)[:numEigs]
-    kEigs = 1/(2*n) * abs(kEigs); 
-    numEigs = len(kEigs);  
-
-    nullSampMMD = torch.zeros((numNullSamp,))
-
-    for i in range(numNullSamp):
-        samp = 2* torch.sum( kEigs * (torch.randn((numEigs,), device=device))**2)
-        nullSampMMD[i] = samp
-
-    nullSampMMD, _ = torch.sort(nullSampMMD)
-    threshold = nullSampMMD[round((1-alpha)*numNullSamp)]
-    return threshold.item()
-
+from MMDutils import * 
 
 def runTest(X, Y, kernel_func, stat_func, thresh_func, 
             alpha=0.05, paired=False, thresh_method='bootstrap'):
@@ -190,69 +72,11 @@ def runTestLoop(SourceX, SourceY, NN, MM, kernel_func,
     return Power 
 
 
-def main():
-    # the sampling distributions 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    d, epsilon = 10, 0.0 # 0.30
-    meanX, meanY = torch.ones((d,)),  torch.ones((d,))*(1+epsilon)
-    covX, covY = torch.eye(d), torch.eye(d)
-   
-    def SourceX(n):
-        return GaussianVector(mean=meanX, cov=covX, n=n)
-
-    def SourceY(n):
-        return GaussianVector(mean=meanY, cov=covY, n=n)
-
-
-    alpha = 0.05 
-    kernel_func = partial(RBFkernel1, bw=sqrt(d))
-
-    n = 500 
-    NN = np.linspace(50, n, 50, dtype=int)
-    num_trials=20
-
-    # set up function handles for the different statistics 
-    unbiased_mmd2 = partial(TwoSampleMMDSquared, unbiased=True) 
-    biased_mmd2 = TwoSampleMMDSquared 
-    linear_mmd2 = partial(BlockMMDSquared, b=2)
-    # block_mmd2 = partial(BlockMMDSquared, b=int(sqrt(n)))
-    block_mmd2 = partial(BlockMMDSquared, b=10)
-    cross_mmd2 = crossMMD2sampleUnpaired
-
-    #set up function handles for different threshold computing methods
-    thresh_bootstrap = partial(get_bootstrap_threshold, 
-                                num_perms=num_perms, device=device) 
-
-    thresh_spectral = partial(get_spectral_threshold, numNullSamp=num_perms)
-
-    thresh_normal = get_normal_threshold
-
-    thresh_convergence_biased = partial(get_unifrom_convergence_threshold,
-                                            biased=True)
-    thresh_convergence_unbiased = partial(get_unifrom_convergence_threshold,
-                                            biased=False)
-
-    # set up the quadratic-time test with 
-    TESTS = {
-        'mmd2-bootstrap': (unbiased_mmd2, thresh_bootstrap, 'bootstrap'), 
-        'mmd2-Mcdiarmid': (biased_mmd2, thresh_convergence_biased, 'uniform_convergence'), 
-        'mmd2-Hoeffding': (unbiased_mmd2, thresh_convergence_unbiased, 'uniform_convergence'), 
-        'mmd2-linear': (linear_mmd2, thresh_bootstrap, 'bootstrap'),
-        'mmd2-block': (block_mmd2, thresh_bootstrap, 'bootstrap'), 
-        'mmd2-spectral': (unbiased_mmd2, thresh_spectral, 'spectral'), 
-        'cross-mmd2': (cross_mmd2, thresh_normal, 'normal')
-    }
-
-    Power = runTestLoop(SourceX, SourceY, NN, NN, kernel_func, TESTS, 
-                paired=True, alpha=alpha, num_trials=num_trials)
-    
-    return Power 
-
-def main_new(d=10, epsilon=0.3, n=300, num_trials=200, num_perms=200, alpha=0.05, 
+def main(d=10, epsilon=0.3, n=300, num_trials=200, num_perms=200, alpha=0.05, 
     save_fig=False, save_data=False, figname0=None, figname1=None, 
     filename=None, null=False, RBF=True, num_perturbations=None, plot_figs=True,
-    return_data=False, num_steps=20, seed=None, initial_value=10, methods=None
-        ):
+    return_data=False, num_steps=20, seed=None, initial_value=10, methods=None, 
+    mode=1, num_pts = 50):
     # the sampling distributions 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -300,7 +124,8 @@ def main_new(d=10, epsilon=0.3, n=300, num_trials=200, num_perms=200, alpha=0.05
             torch.manual_seed(i) 
             X, Y = SourceX(ni), SourceY(ni) 
 
-            bw = get_median_bw(X)
+            bw = median_bw_selector(SourceX, SourceY, X, Y, mode=mode, num_pts=num_pts)
+
             if RBF:
                 kernel_func = partial(RBFkernel1, bw=bw)
             else:
@@ -412,8 +237,8 @@ if __name__=='__main__':
     save_fig = False 
     save_data = False
     alpha = 0.05 
-    num_perms=200
-    num_trials=100
+    num_perms=20
+    num_trials=10
 
 
     for idx, d in enumerate(dd):
@@ -428,7 +253,7 @@ if __name__=='__main__':
             figname1 = f'../data/Expt2_Time_d_{d}_RBF_GMD_new.png'
             filename = f'../data/Expt2_d_{d}_n_{n}_RBF_GMD_new.pkl'
 
-            main_new(d=d, n=n, save_fig=save_fig, save_data=save_data,
+            main(d=d, n=n, save_fig=save_fig, save_data=save_data,
                 figname0=figname0, figname1=figname1, filename=filename, 
                 null=False, RBF=True, num_perms=num_perms, num_trials=num_trials,
                 epsilon=epsilon)
@@ -436,7 +261,7 @@ if __name__=='__main__':
             figname0 = f'../data/Expt1_Power_d_{d}_RBF_null_GMD_new.png'
             figname1 = f'../data/Expt1_Time_d_{d}_RBF_null_GMD_new.png'
             filename = f'../data/Expt1_d_{d}_n_{n}_RBF_null_GMD_new.pkl'
-            main_new(d=d, n=n, save_fig=save_fig, save_data=save_data,
+            main(d=d, n=n, save_fig=save_fig, save_data=save_data,
                 figname0=figname0, figname1=figname1, filename=filename, 
                 null=True, RBF=True, num_perms=num_perms, num_trials=num_trials, 
                 epsilon=epsilon)

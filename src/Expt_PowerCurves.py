@@ -13,16 +13,40 @@ import tikzplotlib as tpl
 
                                                                 
 #########################################################################
-
 def main(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
             num_perms=200, num_bootstrap=200, alpha=0.05, num_points=20,
             block_size_exponent = 0.5, methods=None, kernel_type='RBF',
             poly_degree=2, initial_sample_size=10, save_fig=False,
-            save_data=False, figname=None, filename=None, title_info=None):
+            save_data=False, figname=None, filename=None, title_info=None, 
+            mode=1, num_pts_bw=50):
+    
+    """
+    Compute the power curves of different mmd tests 
+
+    SourceX     : function handle for generate X samples 
+    SourceY     : function handle for generate Y samples 
+    kernel_func : function hand for the pos-def kernel
+    (n, m)      : number of X and Y observations
+    num_trials  : number of repetitions for estimating the power 
+    methods     : list of string indicating the names of tests to be compared
+    num_points  : number of points in the power curves
+    kernel_type : "RBF" or "Polynomial" or "Linear"
+    poly_degree : int denoting the degree of polynomial, if kernel_type="Polynomial"
+    save_fig    : if True, save the figures
+    save_data   : if True, save the data 
+    figname     : string denoting the name of the figure (used if save_fig==True)
+    filename    : string denoting the name of the files (used if save_data==True)
+    title_info  : string to be used in generating the title of the figures
+    mode        : int in {1, 2}, used in calling the "median_bw_selector" function
+    num_pts_bw  : int, used in calling the "median_bw_selector" function
+    """
    
+    # generate the values of sample-sizes to be used in plotting 
+    # the power curves
     NN = np.linspace(initial_sample_size, n, num_points, dtype=int)
     MM = np.linspace(initial_sample_size, n, num_points, dtype=int)
 
+    # the names of methods whose power curves are to be plotted
     if methods is None: 
         methods = ['mmd-perm', 'c-mmd', 'mmd-spectral', 'b-mmd', 'l-mmd', 'predicted']
 
@@ -31,25 +55,27 @@ def main(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
         temp = max(m, n)
         m, n = temp, temp
 
-    #########################################################################
-
     #set up function handles for different threshold computing methods
     thresh_permutation = partial(get_bootstrap_threshold, num_perms=num_perms) 
     thresh_normal = get_normal_threshold
     thresh_spectral = partial(get_spectral_threshold,  alpha=alpha, numNullSamp=200)
 
+    # initialize the dictionaries to store the mean and std of the power 
+    # of the different tests in the list "method"
     PowerDict = {}
     PowerStdDevDict = {}
-
     for method in methods:
         PowerDict[method] = np.zeros((num_trials, len(NN)))
         PowerStdDevDict[method] = np.zeros(NN.shape)
 
+    # the main loop 
     for i in tqdm(range(num_trials)):
         for j, (ni, mi) in enumerate(zip(NN, MM)):
+            # generate the data for this trial
             X, Y = SourceX(ni), SourceY(mi) 
-
-            bw = get_median_bw(X=X, Y=Y)
+            # obtain the bandwidth of the kernel
+            bw = median_bw_selector(SourceX, SourceY, X, Y, mode, num_pts_bw)
+            # initialize the kernel
             if kernel_func is None: # default is to use the RBF kernel
                 if kernel_type=='RBF' or kernel_type is None:
                     kernel_type='RBF' # just in case it is None
@@ -62,12 +88,11 @@ def main(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
                     else:
                         kernel_func = partial(PolynomialKernel, degree=poly_degree,
                         scale=bw)
-
             # set up function handles for the different statistics 
             unbiased_mmd2 = partial(TwoSampleMMDSquared, unbiased=True) 
             biased_mmd2 = partial(TwoSampleMMDSquared, unbiased=False) 
             cross_mmd2 = crossMMD2sampleUnpaired
-
+            # run all the tests contained in "methods"
             for method in methods:
                 if method=='mmd-perm':
                     stat = unbiased_mmd2(X, Y, kernel_func)
@@ -90,23 +115,23 @@ def main(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
                     th = sig*thresh_normal(alpha)
                 # record the outcome of this test
                 PowerDict[method][i][j] = 1.0*(stat>th)
-
+    #compute the mean and std of the power of all methods
     for method in methods:
         PowerStdDevDict[method] = np.array([
             get_bootstrap_std(PowerDict[method][:, i], num_bootstrap=num_bootstrap) 
             for i in range(len(NN)) ])
         PowerDict[method] = PowerDict[method].mean(axis=0) 
-
+    # predict the power of the permutation-kernel-MMD test 
+    # using the observed power of cross-MMD test 
+    # see Eq. (9) of Shekar, Kim, and Ramdas, Neurips 2022. 
     if 'predicted' in methods:
         pred_power = predict_power(PowerDict['c-mmd'],alpha=alpha)
         PowerDict['predicted'] = pred_power
         # heuristic calculation of the uncertainty: sqrt(p*(1-p)/n)
         PowerStdDevDict['predicted'] = np.sqrt(pred_power*(1-pred_power)/num_trials)
 
-
-    palette = sns.color_palette(palette='tab10', n_colors=10)
-
     # Generate the results dict 
+    palette = sns.color_palette(palette='tab10', n_colors=10)
     Results = {}
     Results['num_trials'] = num_trials 
     Results['n'] = n 
@@ -119,7 +144,7 @@ def main(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
     Results['PowerStdDevDict'] = PowerStdDevDict
     Results['methods'] = methods
     Results['palette'] = palette
-
+    # plot the results
     fig1 = plt.figure()
     ax = fig1.add_subplot(111)
     for i, method in enumerate(methods):
@@ -159,15 +184,12 @@ def main(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
         filename = 'PowerCurve_'
         timestr = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         filename = '../data/' + filename + timestr + '_.pkl'
-        print(filename)
-
-
-
+        # print(filename)
+    # store the data if required 
     if save_data:
         with open(filename, 'wb') as f:
             pickle.dump(Results, f)
-
-    # store the filename and figname 
+    # store the filename and figname in the results dict 
     Results['figname'] = figname
     Results['filename'] = filename
     return Results
@@ -177,7 +199,7 @@ def mainTime(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
             num_perms=200, alpha=0.05, num_points=20,
             block_size_exponent = 0.5, methods=None, kernel_type='RBF',
             poly_degree=2, initial_sample_size=10, save_fig=False,
-            figname=None,  title_info=None):
+            figname=None,  title_info=None, mode=1, num_pts_bw=50):
    
     if methods is None: 
         methods = ['mmd-perm', 'c-mmd']
@@ -208,7 +230,7 @@ def mainTime(SourceX, SourceY, kernel_func=None,  n=200, m=200, num_trials=200,
         for j, (ni, mi) in enumerate(zip(NN, MM)):
             X, Y = SourceX(ni), SourceY(mi) 
 
-            bw = get_median_bw(X=X, Y=Y)
+            bw = median_bw_selector(SourceX, SourceY, X, Y, mode, num_pts_bw)
             if kernel_func is None: # default is to use the RBF kernel
                 if kernel_type=='RBF' or kernel_type is None:
                     kernel_type='RBF' # just in case it is None
@@ -338,8 +360,12 @@ if __name__=='__main__':
     parser.add_argument('--time_expt', action='store_true',
                             help="if true, run the experiment comparing \\\
                             running times of cMMD and MMD")
+    parser.add_argument('--mode', choices={1, 2}, default=1,
+                            help="mode for selecting bandwidth via median heuristic")
+    parser.add_argument('--num_pts_bw', type=int, default=25,
+                            help="number of data-points for median heuristic")
 
-    
+
 
     args = parser.parse_args()
     d = args.d
@@ -357,6 +383,9 @@ if __name__=='__main__':
     poly_degree = args.poly_degree
     block_size_exponent=args.bmmd_exp 
     time_expt = args.time_expt 
+    mode = args.mode 
+    num_pts_bw = args.num_pts_bw 
+    
 
     print(d, epsilon, n, m, alpha, num_points, save_fig, kernel_type)
 
@@ -385,7 +414,7 @@ if __name__=='__main__':
                         block_size_exponent = 0.5, methods=methods,
                         initial_sample_size=initial_sample_size, save_fig=save_fig, 
                         figname=figname, title_info=title_info, kernel_type=kernel_type, 
-                        poly_degree=poly_degree)
+                        poly_degree=poly_degree, mode=mode, num_pts_bw=num_pts_bw)
         
     else:
         methods = ['mmd-perm', 'c-mmd',  'predicted', 'mmd-spectral', 'b-mmd', 'l-mmd']
@@ -400,5 +429,5 @@ if __name__=='__main__':
                         initial_sample_size=initial_sample_size, save_fig=save_fig, 
                         save_data=save_data, figname=figname, filename=filename, 
                         title_info=title_info, kernel_type=kernel_type, 
-                        poly_degree=poly_degree)
+                        poly_degree=poly_degree, mode=mode, num_pts_bw=num_pts_bw)
         

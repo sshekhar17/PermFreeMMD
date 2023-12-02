@@ -1,4 +1,5 @@
 import pickle
+import torch 
 from time import time 
 from math import sqrt, log
 from functools import partial 
@@ -25,8 +26,31 @@ def get_median_bw(Z=None, X=None, Y=None):
     sig = np.median(dists_)
     return sig
 
-
-
+def median_bw_selector(SourceX, SourceY, X, Y, mode=1, num_pts=None):
+    """
+        SourceX: function handle for generating X
+        SourceY: function handle for generating X
+        X,Y:     nxd arrays of observations
+        mode=1: generate num_pts (X, Y) points from SourceX, SourceY
+                for median_calculation
+        mode=2: Choose the first n/2 points of X and Y for median 
+                calculation
+    """
+    if mode==1: 
+        # choose a default value of num_points if needed
+        num_pts = 25 if num_pts is None else num_pts 
+        # generate a new set of observations for bandwidth selection
+        X_, Y_ = SourceX(num_pts), SourceY(num_pts)
+    elif mode==2: 
+        assert X is not None and Y is not None 
+        n, m = len(X), len(Y) 
+        # use the first half of the given data for bandwidth selection
+        X_, Y_ = X[:n//2], Y[m//2]
+    else: 
+        raise Exception(f"mode must either be 1 or 2: input = {mode}")
+    bw = get_median_bw(X=X_, Y=Y_)
+    return bw 
+        
 
 def get_bootstrap_threshold(X, Y, kernel_func, statfunc, alpha=0.05,
                             num_perms=500, progress_bar=False,
@@ -116,8 +140,61 @@ def get_spectral_threshold(X, Y, kernel_func, alpha=0.05, numEigs=None,
     return threshold
 
 
+def get_spectral_threshold_torch(X, Y, kernel_func, alpha=0.05, numEigs=None,
+                            numNullSamp=200):
+    n = len(X)
+    assert len(Y)==n
+
+    if numEigs is None:
+        numEigs = 2*n-2
+    numEigs = min(2*n-2, numEigs)
+
+    testStat = n*TwoSampleMMDSquared(X, Y, kernel_func, unbiased=False)
+
+    #Draw samples from null distribution
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    Z = torch.vstack((X, Y))
+    Z = Z.to(device)
+    # kernel matrix of the concatenated data
+    KZ = kernel_func(Z, Z) # 
+    
+    H = torch.eye(2*n) - 1/(2*n)*torch.ones((2*n, 2*n))
+    H = H.to(device)
+    KZ_ = torch.mm(H, torch.mm(KZ, H))
+
+
+    kEigs = torch.linalg.eigvals(KZ_)[:numEigs]
+    kEigs = 1/(2*n) * abs(kEigs); 
+    numEigs = len(kEigs);  
+
+    nullSampMMD = torch.zeros((numNullSamp,))
+
+    for i in range(numNullSamp):
+        samp = 2* torch.sum( kEigs * (torch.randn((numEigs,), device=device))**2)
+        nullSampMMD[i] = samp
+
+    nullSampMMD, _ = torch.sort(nullSampMMD)
+    threshold = nullSampMMD[round((1-alpha)*numNullSamp)]
+    return threshold.item()
+
+
+
+def get_unifrom_convergence_threshold(n, m, k_max=1.0, alpha=0.05, biased=False): 
+    assert 0<alpha<1
+    if biased: 
+        #use Mcdiarmid's inequality based bound stated in Corollary 9 of 
+        # Gretton et al. (2012), JMLR
+        threshold = sqrt(k_max/n + k_max/m)*(1+ sqrt(2*log(1/alpha)))
+    else:
+        # use Hoeffding's inequality based bound stated in Corollary 11 of 
+        # Gretton et al. (2012), JMLR
+        threshold = (sqrt(2)*4*k_max/sqrt(m+n)) * sqrt(log(1/alpha))
+    return threshold
+
+
 def runCMMDtest(SourceX, SourceY, n, m, kernel_func=None, 
-                    alpha=0.05, num_trials=100, return_stat_vals=False):
+                    alpha=0.05, num_trials=100, return_stat_vals=False, 
+                    mode=1, num_pts=25):
     th = get_normal_threshold(alpha=alpha)
     stat = np.zeros((num_trials,))
     rejected = np.zeros((num_trials,))
@@ -126,7 +203,7 @@ def runCMMDtest(SourceX, SourceY, n, m, kernel_func=None,
         X, Y = SourceX(n), SourceY(m)
         # check if the kernel function is provided
         if kernel_func is None: 
-            bw = get_median_bw(X=X, Y=Y)
+            bw = median_bw_selector(SourceX, SourceY, X, Y, mode=mode, num_pts=num_pts)
             kernel_ = partial(RBFkernel1, bw=bw)
         else:
             kernel_ = kernel_func 
@@ -150,7 +227,9 @@ def runCMMDexperiment(SourceX, SourceY,
                         alpha=0.05,
                         num_steps=20,
                         seed=None,
-                        initial_value=20
+                        initial_value=20, 
+                        mode=1, 
+                        num_pts=25
 ):
     if seed is not None: 
         np.random.seed(seed)
@@ -162,6 +241,7 @@ def runCMMDexperiment(SourceX, SourceY,
     for i, (n_, m_) in enumerate(zip(NN, MM)):
         power = runCMMDtest(SourceX, SourceY, n_, m_,
                     kernel_func=kernel_func, alpha=alpha,
-                    num_trials=num_trials, return_stat_vals=False)
+                    num_trials=num_trials, return_stat_vals=False, 
+                    mode=mode, num_pts=num_pts)
         Power[i] = power 
     return NN, MM, Power
