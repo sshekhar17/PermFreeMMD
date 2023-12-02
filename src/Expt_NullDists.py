@@ -6,39 +6,52 @@ import pickle
 from datetime import datetime 
 from math import sqrt, log
 from functools import partial 
-
-import torch 
-import numpy as np 
-import scipy.stats as stats 
-
 from tqdm import tqdm 
 import matplotlib.pyplot as plt
-
-from MMDutils import get_median_bw
-plt.style.use('seaborn-white')
-import seaborn as sns
-
-from utils import * 
-
+import numpy as np 
+import scipy.stats as stats 
 import tikzplotlib as tpl 
 
-def main(n=400, m=500, d=10, d_high=500, SourceX=None, SourceX2=None,
-            save_fig=False, figname=None, num_trials=2000, kernel_type='RBF',
-            save_data=False, filename=None, poly_degree=2):
+from MMDutils import median_bw_selector
+from utils import * 
 
+plt.style.use('seaborn-white')
+
+def mainNull(n=400, m=500, d=10, d_high=500, SourceX=None, SourceX2=None,
+            save_fig=False, figname=None, num_trials=2000, kernel_type='RBF',
+            save_data=False, filename=None, poly_degree=2, mode=1, num_pts_bw=25):
+    
+    """
+        Plot the null distribution of cross-MMD and the usual MMD statistic for 
+        low and high dimensional observations on the same figure  
+
+        n, m        :number of X and Y observations
+        d, d_high   :dimensionality of low and high dimensional observations
+        SourceX     :function handle for the low-dimensional source
+        SourceX2    :function handle for the high-dimensional source
+        num_trials  :number of repetitions to estimate the null distribution for plotting
+        kernel_type :"RBF", "Polynomial", or "Linear"
+        poly_degree :int denoting the degree, if kernel_type=="Polynomial"
+        save_fig    :if true, save the figure in .tex and .png formats
+        figname     :name of figure to be used, is save_fig is True
+        save_data   :if true, save the data as a .pkl file 
+        filename    :string denoting the name of file, if save_data is true 
+        mode        : int in {1, 2}, used in calling the "median_bw_selector" function
+        num_pts_bw  : int, used in calling the "median_bw_selector" function
+
+    """
     # default sources are Gaussian 
     if SourceX is None:
         def SourceX(n):
-            return GaussianVector(mean=torch.zeros((d,)), cov=torch.eye(d), n=n)
+            return GaussianVector(mean=np.zeros((d,)), cov=np.eye(d), n=n)
     if SourceX2 is None:
         def SourceX2(n):
-            return GaussianVector(mean=torch.zeros((d_high,)), cov=torch.eye(d_high), n=n)
-    
+            return GaussianVector(mean=np.zeros((d_high,)), cov=np.eye(d_high), n=n)
     #### Sanity Check: 
-    #### ensure that SourceX generates d dimensional observations 
-    #### and that SourceX2 generates d_high dimensional observations 
-    #### if there is a mismatch, then change the d and d_high values to 
-    #### match the dimension of the respective observations. 
+    #ensure that SourceX generates d dimensional observations 
+    #and that SourceX2 generates d_high dimensional observations 
+    #if there is a mismatch, then change the d and d_high values to 
+    #match the dimension of the respective observations. 
     x, x2 = SourceX(2), SourceX2(2)
     d_, d_high_ = x.shape[1], x2.shape[1]
     if d_!=d:
@@ -49,23 +62,20 @@ def main(n=400, m=500, d=10, d_high=500, SourceX=None, SourceX2=None,
         print(f"Input high dimension is {d_high}, while source generates {d_high_} dimensional observations")
         print("Setting the high dimension equal to the source dimension")
         d_high = d_high_
-    ####
-
-
-    CrossMMDVals = torch.zeros((num_trials,))
-    MMDVals = torch.zeros((num_trials,))
-
-    CrossMMDVals2 = torch.zeros((num_trials,))
-    MMDVals2 = torch.zeros((num_trials,))
-
+    # initialize the arrays to hold the statistic values
+    CrossMMDVals = np.zeros((num_trials,))
+    MMDVals = np.zeros((num_trials,))
+    CrossMMDVals2 = np.zeros((num_trials,))
+    MMDVals2 = np.zeros((num_trials,))
+    # the main loop 
     for i in tqdm(range(num_trials)):
-        X = SourceX(n)
-        Y = SourceX(m)
-        bw = get_median_bw(X=X, Y=Y)
-
+        # obtain the low and high dimensional observations 
+        X, Y = SourceX(n), SourceX(m)
         X2, Y2 = SourceX2(n), SourceX2(m)
-        bw2 = get_median_bw(X=X2, Y=Y2)
-
+        # obtain the bandwidths of the kernels to be used
+        bw = median_bw_selector(SourceX, SourceX, X, Y, mode=mode, num_pts=num_pts_bw)
+        bw2 = median_bw_selector(SourceX2, SourceX2, X2, Y2, mode=mode, num_pts=num_pts_bw)
+        # initialize the kernels
         if kernel_type=='RBF':
             kernel_func = partial(RBFkernel1, bw=bw)
             kernel_func2 = partial(RBFkernel1, bw=bw2)
@@ -75,11 +85,9 @@ def main(n=400, m=500, d=10, d_high=500, SourceX=None, SourceX2=None,
         elif kernel_type == 'Polynomial':
             kernel_func = partial(PolynomialKernel, scale=bw, degree=poly_degree)
             kernel_func2 = partial(PolynomialKernel, scale=bw2, degree=poly_degree)
-
-        # get the values of the cMMD statistic
+        # get the values of the cross-MMD statistic
         CrossMMDVals[i] = crossMMD2sampleUnpaired(X=X, Y=Y, kernel_func=kernel_func)
         CrossMMDVals2[i] = crossMMD2sampleUnpaired(X=X2, Y=Y2, kernel_func=kernel_func2)
-
         # get the values of MMD statistic, normalized by their resampled standard deviation
         mmd_func = partial(TwoSampleMMDSquared, unbiased=True, return_float=True)
         MMDVals[i] = mmd_func(X, Y, kernel_func)
@@ -89,17 +97,9 @@ def main(n=400, m=500, d=10, d_high=500, SourceX=None, SourceX2=None,
         MMDVals[i] /= std1
         MMDVals2[i] /= std2
 
-    # Plot the result 
+    # prepare to plot the results 
     xx = np.linspace(-10, 10, 1000)
     pp = stats.norm.pdf(xx) # the normal pdf 
-
-    CrossMMDVals = CrossMMDVals.numpy()
-    CrossMMDVals2 = CrossMMDVals2.numpy()
-
-    MMDVals = MMDVals.numpy()
-    MMDVals2 = MMDVals2.numpy()
-
-
     if figname is None:
         figname = '../data/' +  f'Null_Dists_d_{d}_{d_high}_n_{n}_m_{m}_kernel_'
         figname = figname + kernel_type
@@ -107,8 +107,7 @@ def main(n=400, m=500, d=10, d_high=500, SourceX=None, SourceX2=None,
         figname = figname + timestr
     crossmmdfigname = figname + 'cross.tex'
     mmdfigname = figname + 'mmd.tex'
-
-
+    # plot the null distribution of cross-MMD statistic
     fig = plt.figure()
     ax = fig.add_subplot(111)
     ax.hist(x=[CrossMMDVals, CrossMMDVals2], density=True, label=[f'd={d}', f'd={d_high}'], alpha=0.8)
@@ -121,6 +120,7 @@ def main(n=400, m=500, d=10, d_high=500, SourceX=None, SourceX2=None,
     else:
         plt.show()
 
+    # plot the null distribution of the usual-MMD statistic
     fig = plt.figure()
     ax = fig.add_subplot(111)
     ax.hist(x=[MMDVals, MMDVals2], density=True, label=[f'mmd (d={d})', f'mmd (d={d_high})'], alpha=0.8)
@@ -132,11 +132,10 @@ def main(n=400, m=500, d=10, d_high=500, SourceX=None, SourceX2=None,
         tpl.save(mmdfigname, axis_width=r'\figwidth', axis_height=r'\figheight')
     else:
         plt.show()
-
+    # save the data if required
     if save_data: 
         if filename is None:
             filename = figname + '.pkl'
-
         results = {}
         results['n'] = n
         results['m'] = m
@@ -147,7 +146,6 @@ def main(n=400, m=500, d=10, d_high=500, SourceX=None, SourceX2=None,
         results['cMMD2'] = CrossMMDVals2
         results['MMD'] = MMDVals
         results['MMD2'] = MMDVals2
-
         with open(filename, "wb") as f:
             pickle.dump(results, f)
 
@@ -172,7 +170,10 @@ if __name__=='__main__':
                             help="choose whether to save the figures or not")
     parser.add_argument('--save_data', action='store_true',
                             help="choose whether to save the data or not")
-    
+    parser.add_argument('--mode', choices={1, 2}, default=1,
+                            help="mode for selecting bandwidth via median heuristic")
+    parser.add_argument('--num_pts_bw', type=int, default=25,
+                            help="number of data-points for median heuristic")
 
     args = parser.parse_args()
     d = args.d_low
@@ -185,6 +186,8 @@ if __name__=='__main__':
     poly_degree= args.poly_degree
     kernel_type = args.kernel_type
     use_dirichlet = args.use_dirichlet
+    mode = args.mode 
+    num_pts_bw = args.num_pts_bw
 
     if use_dirichlet:
         Alpha = 2*np.ones((d,))
@@ -214,7 +217,8 @@ if __name__=='__main__':
         figname += timestr
 
     # Call the main function 
-    main(n=n, m=m, d=d, d_high=d_high, SourceX=SourceX, 
+    mainNull(n=n, m=m, d=d, d_high=d_high, SourceX=SourceX, 
             SourceX2=SourceX2, save_fig=save_fig, figname=figname,
-            num_trials=num_trials, kernel_type=kernel_type, save_data=save_data)
+            num_trials=num_trials, kernel_type=kernel_type, save_data=save_data, 
+            mode=mode, num_pts_bw=num_pts_bw)
 

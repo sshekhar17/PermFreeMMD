@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from time import time 
 
-from MMDtests import main_new
+from MMDtests import main
 
 def createGMDSource(epsilon=1.0, d=10):
     meanX = np.zeros((d,))
